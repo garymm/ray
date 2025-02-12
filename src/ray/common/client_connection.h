@@ -29,8 +29,13 @@
 
 namespace ray {
 
-typedef boost::asio::generic::stream_protocol local_stream_protocol;
-typedef boost::asio::basic_stream_socket<local_stream_protocol> local_stream_socket;
+using local_stream_protocol = boost::asio::generic::stream_protocol;
+using local_stream_socket = boost::asio::basic_stream_socket<local_stream_protocol>;
+
+// Set "close on exec" feature for the given file descriptor.
+// WARNIGN: It does no-op on windows platform.
+void SetCloseOnExec(local_stream_socket &socket);
+void SetCloseOnExec(boost::asio::basic_socket_acceptor<local_stream_protocol> &acceptor);
 
 /// Connect to a socket with retry times.
 Status ConnectSocketRetry(local_stream_socket &socket,
@@ -43,7 +48,15 @@ Status ConnectSocketRetry(local_stream_socket &socket,
 /// A generic type representing a client connection to a server. This typename
 /// can be used to write messages synchronously to the server.
 class ServerConnection : public std::enable_shared_from_this<ServerConnection> {
+ private:
+  // Tag to allow `make_shared` inside of the class.
+  struct Tag {};
+
  public:
+  ServerConnection(Tag, local_stream_socket &&socket);
+  ServerConnection(const ServerConnection &) = delete;
+  ServerConnection &operator=(const ServerConnection &) = delete;
+
   /// ServerConnection destructor.
   virtual ~ServerConnection();
 
@@ -127,7 +140,8 @@ class ServerConnection : public std::enable_shared_from_this<ServerConnection> {
 
  protected:
   /// A private constructor for a server connection.
-  ServerConnection(local_stream_socket &&socket);
+  explicit ServerConnection(local_stream_socket &&socket)
+      : ServerConnection(Tag{}, std::move(socket)) {}
 
   /// A message that is queued for writing asynchronously.
   struct AsyncWriteBuffer {
@@ -184,8 +198,22 @@ using MessageHandler = std::function<void(
 /// writing messages to the client, like in ServerConnection, this typename can
 /// also be used to process messages asynchronously from client.
 class ClientConnection : public ServerConnection {
+ private:
+  // Tag to allow `make_shared` inside of the class.
+  struct Tag {};
+
  public:
   using std::enable_shared_from_this<ServerConnection>::shared_from_this;
+
+  ClientConnection(Tag,
+                   MessageHandler &message_handler,
+                   local_stream_socket &&socket,
+                   const std::string &debug_label,
+                   const std::vector<std::string> &message_type_enum_names,
+                   int64_t error_message_type);
+
+  ClientConnection(const ClientConnection &) = delete;
+  ClientConnection &operator=(const ClientConnection &) = delete;
 
   /// Allocate a new node client connection.
   ///
@@ -218,13 +246,21 @@ class ClientConnection : public ServerConnection {
   /// ProcessClientMessage handler will be called.
   void ProcessMessages();
 
+  const std::string GetDebugLabel() const { return debug_label_; }
+
  protected:
   /// A protected constructor for a node client connection.
   ClientConnection(MessageHandler &message_handler,
                    local_stream_socket &&socket,
                    const std::string &debug_label,
                    const std::vector<std::string> &message_type_enum_names,
-                   int64_t error_message_type);
+                   int64_t error_message_type)
+      : ClientConnection(Tag{},
+                         message_handler,
+                         std::move(socket),
+                         debug_label,
+                         message_type_enum_names,
+                         error_message_type) {}
   /// Process an error from the last operation, then process the  message
   /// header from the client.
   void ProcessMessageHeader(const boost::system::error_code &error);

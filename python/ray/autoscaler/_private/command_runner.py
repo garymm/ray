@@ -11,11 +11,11 @@ from typing import Dict, List
 
 import click
 
+from ray._private.ray_constants import DEFAULT_OBJECT_STORE_MAX_MEMORY_BYTES
 from ray.autoscaler._private.cli_logger import cf, cli_logger
 from ray.autoscaler._private.constants import (
     AUTOSCALER_NODE_SSH_INTERVAL_S,
     AUTOSCALER_NODE_START_WAIT_S,
-    DEFAULT_OBJECT_STORE_MAX_MEMORY_BYTES,
     DEFAULT_OBJECT_STORE_MEMORY_PROPORTION,
 )
 from ray.autoscaler._private.docker import (
@@ -168,8 +168,8 @@ class SSHCommandRunner(CommandRunnerInterface):
         use_internal_ip,
     ):
 
-        ssh_control_hash = hashlib.md5(cluster_name.encode()).hexdigest()
-        ssh_user_hash = hashlib.md5(getuser().encode()).hexdigest()
+        ssh_control_hash = hashlib.sha1(cluster_name.encode()).hexdigest()
+        ssh_user_hash = hashlib.sha1(getuser().encode()).hexdigest()
         ssh_control_path = "/tmp/ray_ssh_{}/{}".format(
             ssh_user_hash[:HASH_MAX_LENGTH], ssh_control_hash[:HASH_MAX_LENGTH]
         )
@@ -349,7 +349,7 @@ class SSHCommandRunner(CommandRunnerInterface):
                         cf.bold(local),
                         cf.bold(remote),
                     )  # todo: msg
-                    ssh += ["-L", "{}:localhost:{}".format(remote, local)]
+                    ssh += ["-L", "{}:localhost:{}".format(local, remote)]
 
         final_cmd = (
             ssh

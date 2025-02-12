@@ -1,18 +1,26 @@
+import os
+import tempfile
+
 import numpy as np
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader
 import torchvision
 import torchvision.transforms as transforms
+from torch.utils.data import DataLoader
 from torchvision.models import resnet18
 
 import ray
-from ray.air import RunConfig, session
-from ray.air.config import ScalingConfig, FailureConfig, CheckpointConfig
-from ray.air.checkpoint import Checkpoint
+import ray.cloudpickle as cpickle
 import ray.train.torch
+from ray import train, tune
+from ray.train import (
+    Checkpoint,
+    CheckpointConfig,
+    FailureConfig,
+    RunConfig,
+    ScalingConfig,
+)
 from ray.train.horovod import HorovodTrainer
-from ray import tune
 from ray.tune.schedulers import create_scheduler
 from ray.tune.tune_config import TuneConfig
 from ray.tune.tuner import Tuner
@@ -46,9 +54,12 @@ def train_loop_per_worker(config):
     )
     epoch = 0
 
-    checkpoint = session.get_checkpoint()
+    checkpoint = train.get_checkpoint()
     if checkpoint:
-        checkpoint_dict = checkpoint.to_dict()
+        with checkpoint.as_directory() as checkpoint_dir:
+            with open(os.path.join(checkpoint_dir, "data.ckpt"), "rb") as fp:
+                checkpoint_dict = cpickle.load(fp)
+
         model_state = checkpoint_dict["model_state"]
         optimizer_state = checkpoint_dict["optimizer_state"]
         epoch = checkpoint_dict["epoch"] + 1
@@ -77,7 +88,7 @@ def train_loop_per_worker(config):
         trainset, batch_size=int(config["batch_size"]), sampler=train_sampler
     )
 
-    for epoch in range(epoch, 40):  # loop over the dataset multiple times
+    for current_epoch in range(epoch, 40):  # loop over the dataset multiple times
         running_loss = 0.0
         epoch_steps = 0
         for i, data in enumerate(trainloader):
@@ -101,20 +112,24 @@ def train_loop_per_worker(config):
             if i % 2000 == 1999:  # print every 2000 mini-batches
                 print(
                     "[%d, %5d] loss: %.3f"
-                    % (epoch + 1, i + 1, running_loss / epoch_steps)
+                    % (current_epoch + 1, i + 1, running_loss / epoch_steps)
                 )
 
             if config["smoke_test"]:
                 break
 
-        checkpoint = Checkpoint.from_dict(
-            dict(
-                model_state=net.state_dict(),
-                optimizer_state=optimizer.state_dict(),
-                epoch=epoch,
-            )
-        )
-        session.report(dict(loss=running_loss / epoch_steps), checkpoint=checkpoint)
+        with tempfile.TemporaryDirectory() as checkpoint_dir:
+            with open(os.path.join(checkpoint_dir, "data.ckpt"), "wb") as fp:
+                cpickle.dump(
+                    dict(
+                        model_state=net.state_dict(),
+                        optimizer_state=optimizer.state_dict(),
+                        epoch=current_epoch,
+                    ),
+                    fp,
+                )
+            checkpoint = Checkpoint.from_directory(checkpoint_dir)
+            train.report(dict(loss=running_loss / epoch_steps), checkpoint=checkpoint)
 
 
 if __name__ == "__main__":

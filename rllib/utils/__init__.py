@@ -1,3 +1,4 @@
+from collections import deque
 import contextlib
 from functools import partial
 
@@ -23,7 +24,6 @@ from ray.rllib.utils.numpy import (
     MIN_LOG_NN_OUTPUT,
     MAX_LOG_NN_OUTPUT,
 )
-from ray.rllib.utils.pre_checks.env import check_env
 from ray.rllib.utils.schedules import (
     LinearSchedule,
     PiecewiseSchedule,
@@ -35,7 +35,6 @@ from ray.rllib.utils.test_utils import (
     check,
     check_compute_single_action,
     check_train_results,
-    framework_iterator,
 )
 from ray.tune.utils import merge_dicts, deep_update
 
@@ -85,7 +84,7 @@ def force_list(elements=None, to_tuple=False):
         ctor()
         if elements is None
         else ctor(elements)
-        if type(elements) in [list, set, tuple]
+        if type(elements) in [list, set, tuple, deque]
         else ctor([elements])
     )
 
@@ -109,7 +108,6 @@ force_tuple = partial(force_list, to_tuple=True)
 __all__ = [
     "add_mixins",
     "check",
-    "check_env",
     "check_compute_single_action",
     "check_train_results",
     "deep_update",
@@ -117,7 +115,6 @@ __all__ = [
     "fc",
     "force_list",
     "force_tuple",
-    "framework_iterator",
     "lstm",
     "merge_dicts",
     "one_hot",

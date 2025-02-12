@@ -28,7 +28,7 @@ A new Ray session creates a new folder to the temp directory. The latest session
 
 Usually, temp directories are cleared up whenever the machines reboot. As a result, log files may get lost whenever your cluster or some of the nodes are stopped or terminated.
 
-If you need to inspect logs after the clusters are stopped or terminated, you need to store and persist the logs. View the instructions for how to process and export logs for {ref}`clusters on VMs <vm-logging>` and {ref}`KubeRay Clusters <kuberay-logging>`.
+If you need to inspect logs after the clusters stop or terminate, you need to store and persist the logs. See the instructions for how to process and export logs for {ref}`Log persistence <vm-logging>` and {ref}`KubeRay Clusters <persist-kuberay-custom-resource-logs>`.
 
 (logging-directory-structure)=
 ## Log files in logging directory
@@ -41,7 +41,7 @@ System logs may include information about your applications. For example, ``runt
 :::
 
 ### Application logs
-- ``job-driver-[submission_id].log``: The stdout of a job submitted with the :ref:`Ray Jobs API <jobs-overview>`.
+- ``job-driver-[submission_id].log``: The stdout of a job submitted with the {ref}`Ray Jobs API <jobs-overview>`.
 - ``worker-[worker_id]-[job_id]-[pid].[out|err]``: Python or Java part of Ray drivers and workers. All stdout and stderr from Tasks or Actors are streamed to these files. Note that job_id is the ID of the driver.
 
 ### System (component) logs
@@ -58,11 +58,11 @@ System logs may include information about your applications. For example, ``runt
 - ``raylet.[out|err]``: A log file of raylets.
 - ``redis-shard_[shard_index].[out|err]``: Redis shard log files.
 - ``redis.[out|err]``: Redis log files.
-- ``runtime_env_agent.log``: Every Ray node has one agent that manages :ref:`Runtime Environment <runtime-environments>` creation, deletion, and caching.
+- ``runtime_env_agent.log``: Every Ray node has one agent that manages {ref}`Runtime Environment <runtime-environments>` creation, deletion, and caching.
   This is the log file of the agent containing logs of create or delete requests and cache hits and misses.
   For the logs of the actual installations (for example, ``pip install`` logs), see the ``runtime_env_setup-[job_id].log`` file (see below).
 - ``runtime_env_setup-ray_client_server_[port].log``: Logs from installing {ref}`Runtime Environments <runtime-environments>` for a job when connecting with {ref}`Ray Client <ray-client-ref>`.
-- ``runtime_env_setup-[job_id].log``: Logs from installing {ref}`Runtime Environments <runtime-environments>` for a Task, Actor or Job.  This file is only present if a Runtime Environment is installed.
+- ``runtime_env_setup-[job_id].log``: Logs from installing {ref}`runtime environments <runtime-environments>` for a Task, Actor, or Job. This file is only present if you install a runtime environment.
 
 
 (log-redirection-to-driver)=
@@ -95,8 +95,10 @@ The resulting output follows:
 
 ### Coloring Actor log prefixes
 By default, Ray prints Actor log prefixes in light blue.
-Activate multi-color prefixes by setting the environment variable ``RAY_COLOR_PREFIX=1``.
-This indexes into an array of colors modulo the PID of each process.
+Turn color logging off by setting the environment variable ``RAY_COLOR_PREFIX=0``
+(for example, when outputting logs to a file or other location that does not support ANSI codes).
+Or activate multi-color prefixes by setting the environment variable ``RAY_COLOR_PREFIX=1``;
+this indexes into an array of colors modulo the PID of each process.
 
 ![coloring-actor-log-prefixes](../images/coloring-actor-log-prefixes.png)
 
@@ -129,23 +131,68 @@ ray.get([task.remote() for _ in range(100)])
 The output is as follows:
 
 ```bash
-2023-03-27 15:08:34,195	INFO worker.py:1603 -- Started a local Ray instance. View the dashboard at http://127.0.0.1:8265 
+2023-03-27 15:08:34,195	INFO worker.py:1603 -- Started a local Ray instance. View the dashboard at http://127.0.0.1:8265
 (task pid=534172) Hello there, I am a task 0.20583517821231412
 (task pid=534174) Hello there, I am a task 0.17536720316370757 [repeated 99x across cluster] (Ray deduplicates logs by default. Set RAY_DEDUP_LOGS=0 to disable log deduplication)
 ```
 
-This feature is especially useful when importing libraries such as `tensorflow` or `numpy`, which may emit many verbose warning messages when imported. Configure this feature as follows:
+This feature is useful when importing libraries such as `tensorflow` or `numpy`, which may emit many verbose warning messages when you import them.
 
-1. Set ``RAY_DEDUP_LOGS=0`` to disable this feature entirely.
-2. Set ``RAY_DEDUP_LOGS_AGG_WINDOW_S=<int>`` to change the agggregation window.
-3. Set ``RAY_DEDUP_LOGS_ALLOW_REGEX=<string>`` to specify log messages to never deduplicate.
-4. Set ``RAY_DEDUP_LOGS_SKIP_REGEX=<string>`` to specify log messages to skip printing.
+Configure the following environment variables on the driver process **before importing Ray** to customize log deduplication:
 
+* Set ``RAY_DEDUP_LOGS=0`` to turn off this feature entirely.
+* Set ``RAY_DEDUP_LOGS_AGG_WINDOW_S=<int>`` to change the aggregation window.
+* Set ``RAY_DEDUP_LOGS_ALLOW_REGEX=<string>`` to specify log messages to never deduplicate.
+    * Example:
+        ```python
+        import os
+        os.environ["RAY_DEDUP_LOGS_ALLOW_REGEX"] = "ABC"
+
+        import ray
+
+        @ray.remote
+        def f():
+            print("ABC")
+            print("DEF")
+
+        ray.init()
+        ray.get([f.remote() for _ in range(5)])
+
+        # 2024-10-10 17:54:19,095 INFO worker.py:1614 -- Connecting to existing Ray cluster at address: 172.31.13.10:6379...
+        # 2024-10-10 17:54:19,102 INFO worker.py:1790 -- Connected to Ray cluster. View the dashboard at 127.0.0.1:8265
+        # (f pid=1574323) ABC
+        # (f pid=1574323) DEF
+        # (f pid=1574321) ABC
+        # (f pid=1574318) ABC
+        # (f pid=1574320) ABC
+        # (f pid=1574322) ABC
+        # (f pid=1574322) DEF [repeated 4x across cluster] (Ray deduplicates logs by default. Set RAY_DEDUP_LOGS=0 to disable log deduplication, or see https://docs.ray.io/en/master/ray-observability/user-guides/configure-logging.html#log-deduplication for more options.)
+        ```
+* Set ``RAY_DEDUP_LOGS_SKIP_REGEX=<string>`` to specify log messages to skip printing.
+    * Example:
+        ```python
+        import os
+        os.environ["RAY_DEDUP_LOGS_SKIP_REGEX"] = "ABC"
+
+        import ray
+
+        @ray.remote
+        def f():
+            print("ABC")
+            print("DEF")
+
+        ray.init()
+        ray.get([f.remote() for _ in range(5)])
+        # 2024-10-10 17:55:05,308 INFO worker.py:1614 -- Connecting to existing Ray cluster at address: 172.31.13.10:6379...
+        # 2024-10-10 17:55:05,314 INFO worker.py:1790 -- Connected to Ray cluster. View the dashboard at 127.0.0.1:8265
+        # (f pid=1574317) DEF
+        # (f pid=1575229) DEF [repeated 4x across cluster] (Ray deduplicates logs by default. Set RAY_DEDUP_LOGS=0 to disable log deduplication, or see https://docs.ray.io/en/master/ray-observability/user-guides/configure-logging.html#log-deduplication for more options.)
+        ```
 
 
 ## Distributed progress bars (tqdm)
 
-When using `tqdm <https://tqdm.github.io>`__ in Ray remote Tasks or Actors, you may notice that the progress bar output is corrupted. To avoid this problem, use the Ray distributed tqdm implementation at ``ray.experimental.tqdm_ray``:
+When using [tqdm](https://tqdm.github.io) in Ray remote Tasks or Actors, you may notice that the progress bar output is corrupted. To avoid this problem, use the Ray distributed tqdm implementation at ``ray.experimental.tqdm_ray``:
 
 ```{literalinclude} /ray-core/doc_code/tqdm.py
 ```
@@ -158,7 +205,7 @@ This tqdm implementation works as follows:
 
 Limitations:
 
-- Only a subset of tqdm functionality is supported. Refer to the ray_tqdm `implementation <https://github.com/ray-project/ray/blob/master/python/ray/experimental/tqdm_ray.py>`__ for more details.
+- Only a subset of tqdm functionality is supported. Refer to the ray_tqdm [implementation](https://github.com/ray-project/ray/blob/master/python/ray/experimental/tqdm_ray.py) for more details.
 - Performance may be poor if there are more than a couple thousand updates per second (updates are not batched).
 
 By default, the built-in print is also be patched to use `ray.experimental.tqdm_ray.safe_print` when `tqdm_ray` is used.
@@ -176,19 +223,17 @@ import logging
 logger = logging.getLogger("ray")
 logger # Modify the Ray logging config
 ```
-Similarly, to modify the logging configuration for Ray AIR or other libraries, specify the appropriate logger name:
+Similarly, to modify the logging configuration for Ray libraries, specify the appropriate logger name:
 
 ```python
 import logging
 
 # First, get the handle for the logger you want to modify
-ray_air_logger = logging.getLogger("ray.air")
 ray_data_logger = logging.getLogger("ray.data")
 ray_tune_logger = logging.getLogger("ray.tune")
 ray_rllib_logger = logging.getLogger("ray.rllib")
 ray_train_logger = logging.getLogger("ray.train")
 ray_serve_logger = logging.getLogger("ray.serve")
-ray_workflow_logger = logging.getLogger("ray.workflow")
 
 # Modify the ray.data logging level
 ray_data_logger.setLevel(logging.WARNING)
@@ -202,12 +247,18 @@ ray_tune_logger.addHandler(logging.FileHandler("extra_ray_tune_log.log"))
 Implement structured logging to enable downstream users and applications to consume the logs efficiently.
 
 ### Application logs
-A Ray applications include both driver and worker processes. For Python applications, use Python loggers to format and structure your logs. 
-As a result, Python loggers need to be set up for both driver and worker processes.
+A Ray app includes both driver and worker processes. For Python apps, use Python loggers to format and structure your logs.
+As a result, you need to set up Python loggers for both driver and worker processes.
 
 ::::{tab-set}
 
 :::{tab-item} Ray Core
+
+```{admonition} Caution
+:class: caution
+This is an experimental feature. It doesn't support [Ray Client](ray-client-ref) yet.
+```
+
 Set up the Python logger for driver and worker processes separately:
 1. Set up the logger for the driver process after importing `ray`.
 2. Use `worker_process_setup_hook` to configure the Python logger for all worker processes.
@@ -218,8 +269,8 @@ If you want to control the logger for particular actors or tasks, view [customiz
 
 :::
 
-:::{tab-item} Ray AIR or other libraries
-If you are using Ray AIR or any of the Ray libraries, follow the instructions provided in the documentation for the library.
+:::{tab-item} Ray libraries
+If you are using any of the Ray libraries, follow the instructions provided in the documentation for the library.
 :::
 
 ::::
@@ -375,7 +426,15 @@ ray.get(f.remote("A log message for a task."))
 :::
 
 :::{tab-item} Ray Core: all worker processes of a job
+
+```{admonition} Caution
+:class: caution
+This is an experimental feature. The semantic of the API is subject to change.
+It doesn't support [Ray Client](ray-client-ref) yet.
+```
+
 Use `worker_process_setup_hook` to apply the new logging configuration to all worker processes within a job.
+
 ```python
 # driver.py
 def logging_setup_func():
@@ -389,8 +448,8 @@ logging_setup_func()
 ```
 :::
 
-:::{tab-item} Ray AIR or other libraries
-If you are using Ray AIR or any of the Ray libraries, follow the instructions provided in the documentation for the library.
+:::{tab-item} Ray libraries
+If you are using any of the Ray libraries, follow the instructions provided in the documentation for the library.
 :::
 
 ::::
@@ -413,4 +472,4 @@ The max size of a log file, including its backup, is `RAY_ROTATION_MAX_BYTES * R
 
 ## Log persistence
 
-To process and export logs to external stroage or management systems, view {ref}`log persistence on Kubernetes <kuberay-logging>` and {ref}`log persistence on VMs <vm-logging>` for more details.
+To process and export logs to external stroage or management systems, view {ref}`log persistence on Kubernetes <persist-kuberay-custom-resource-logs>` see {ref}`log persistence on VMs <vm-logging>` for more details.

@@ -1,24 +1,35 @@
 import collections
-from typing import TYPE_CHECKING, Any, Dict, Iterator, List, Mapping, TypeVar, Union
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Dict,
+    Iterator,
+    List,
+    Mapping,
+    Optional,
+    TypeVar,
+    Union,
+)
 
 import numpy as np
 
 from ray.air.constants import TENSOR_COLUMN_NAME
 from ray.data._internal.block_builder import BlockBuilder
-from ray.data._internal.numpy_support import convert_udf_returns_to_numpy, is_array_like
+from ray.data._internal.numpy_support import is_array_like
+from ray.data._internal.row import TableRow
 from ray.data._internal.size_estimator import SizeEstimator
-from ray.data.block import Block, BlockAccessor
-from ray.data.row import TableRow
+from ray.data._internal.util import MiB
+from ray.data.block import Block, BlockAccessor, BlockType
 
 if TYPE_CHECKING:
-    from ray.data._internal.sort import SortKeyT
+    from ray.data._internal.planner.exchange.sort_task_spec import SortKey
 
 
 T = TypeVar("T")
 
 # The max size of Python tuples to buffer before compacting them into a
 # table in the BlockBuilder.
-MAX_UNCOMPACTED_SIZE_BYTES = 50 * 1024 * 1024
+MAX_UNCOMPACTED_SIZE_BYTES = 50 * MiB
 
 
 class TableBlockBuilder(BlockBuilder):
@@ -111,14 +122,13 @@ class TableBlockBuilder(BlockBuilder):
         return self._concat_would_copy() and len(self._tables) > 1
 
     def build(self) -> Block:
-        columns = {
-            key: convert_udf_returns_to_numpy(col) for key, col in self._columns.items()
-        }
-        if columns:
-            tables = [self._table_from_pydict(columns)]
+        if self._columns:
+            tables = [self._table_from_pydict(self._columns)]
         else:
             tables = []
+
         tables.extend(self._tables)
+
         if len(tables) > 0:
             return self._concat_tables(tables)
         else:
@@ -139,10 +149,7 @@ class TableBlockBuilder(BlockBuilder):
         assert self._columns
         if self._uncompacted_size.size_bytes() < MAX_UNCOMPACTED_SIZE_BYTES:
             return
-        columns = {
-            key: convert_udf_returns_to_numpy(col) for key, col in self._columns.items()
-        }
-        block = self._table_from_pydict(columns)
+        block = self._table_from_pydict(self._columns)
         self.add_block(block)
         self._uncompacted_size = SizeEstimator()
         self._columns.clear()
@@ -161,6 +168,10 @@ class TableBlockAccessor(BlockAccessor):
         return row
 
     @staticmethod
+    def _munge_conflict(name, count):
+        return f"{name}_{count+1}"
+
+    @staticmethod
     def _build_tensor_row(row: TableRow) -> np.ndarray:
         raise NotImplementedError
 
@@ -171,6 +182,9 @@ class TableBlockAccessor(BlockAccessor):
         return default
 
     def column_names(self) -> List[str]:
+        raise NotImplementedError
+
+    def append_column(self, name: str, data: Any) -> Block:
         raise NotImplementedError
 
     def to_block(self) -> Block:
@@ -206,9 +220,21 @@ class TableBlockAccessor(BlockAccessor):
     def zip(self, other: "Block") -> "Block":
         acc = BlockAccessor.for_block(other)
         if not isinstance(acc, type(self)):
-            raise ValueError(
-                "Cannot zip {} with block of type {}".format(type(self), type(other))
-            )
+            if isinstance(self, TableBlockAccessor) and isinstance(
+                acc, TableBlockAccessor
+            ):
+                # If block types are different, but still both of TableBlock type, try
+                # converting both to default block type before zipping.
+                self_norm, other_norm = TableBlockAccessor.normalize_block_types(
+                    [self._table, other],
+                )
+                return BlockAccessor.for_block(self_norm).zip(other_norm)
+            else:
+                raise ValueError(
+                    "Cannot zip {} with block of type {}".format(
+                        type(self), type(other)
+                    )
+                )
         if acc.num_rows() != self.num_rows():
             raise ValueError(
                 "Cannot zip self (length {}) with block of length {}".format(
@@ -221,17 +247,70 @@ class TableBlockAccessor(BlockAccessor):
     def _empty_table() -> Any:
         raise NotImplementedError
 
-    def _sample(self, n_samples: int, key: "SortKeyT") -> Any:
+    def _sample(self, n_samples: int, sort_key: "SortKey") -> Any:
         raise NotImplementedError
 
-    def sample(self, n_samples: int, key: "SortKeyT") -> Any:
-        if key is None or callable(key):
+    def sample(self, n_samples: int, sort_key: "SortKey") -> Any:
+        if sort_key is None or callable(sort_key):
             raise NotImplementedError(
-                f"Table sort key must be a column name, was: {key}"
+                f"Table sort key must be a column name, was: {sort_key}"
             )
         if self.num_rows() == 0:
             # If the pyarrow table is empty we may not have schema
             # so calling table.select() will raise an error.
             return self._empty_table()
         k = min(n_samples, self.num_rows())
-        return self._sample(k, key)
+        return self._sample(k, sort_key)
+
+    @classmethod
+    def normalize_block_types(
+        cls,
+        blocks: List[Block],
+        normalize_type: Optional[BlockType] = None,
+    ) -> List[Block]:
+        """Normalize input blocks to the specified `normalize_type`. If the blocks
+        are already all of the same type, returns the original blocks.
+
+         Args:
+            blocks: A list of TableBlocks to be normalized.
+            normalize_type: The type to normalize the blocks to. If None,
+                the default block type (Arrow) is used.
+
+        Returns:
+            A list of blocks of the same type.
+        """
+        seen_types = set()
+        for block in blocks:
+            acc = BlockAccessor.for_block(block)
+            if not isinstance(acc, TableBlockAccessor):
+                raise ValueError(
+                    "Block type normalization is only supported for TableBlock, "
+                    f"but received block of type: {type(block)}."
+                )
+            seen_types.add(type(block))
+
+        # Return original blocks if they are all of the same type.
+        if len(seen_types) <= 1:
+            return blocks
+
+        results = [
+            cls.try_convert_block_type(block, normalize_type) for block in blocks
+        ]
+
+        if any(not isinstance(block, type(results[0])) for block in results):
+            raise ValueError(
+                "Expected all blocks to be of the same type after normalization, but "
+                f"got different types: {[type(b) for b in results]}. "
+                "Try using blocks of the same type to avoid the issue "
+                "with block normalization."
+            )
+        return results
+
+    @classmethod
+    def try_convert_block_type(cls, block: Block, block_type: BlockType):
+        if block_type == BlockType.ARROW:
+            return BlockAccessor.for_block(block).to_arrow()
+        elif block_type == BlockType.PANDAS:
+            return BlockAccessor.for_block(block).to_pandas()
+        else:
+            return BlockAccessor.for_block(block).to_default()

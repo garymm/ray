@@ -19,13 +19,13 @@
 #include "ray/common/asio/instrumented_io_context.h"
 #include "ray/common/id.h"
 #include "ray/gcs/gcs_client/accessor.h"
+#include "ray/object_manager/ownership_based_object_directory.h"
 #include "ray/pubsub/subscriber.h"
 #include "ray/raylet/test/util.h"
 #include "ray/raylet/worker_pool.h"
 #include "ray/rpc/grpc_client.h"
 #include "ray/rpc/worker/core_worker_client.h"
 #include "ray/rpc/worker/core_worker_client_pool.h"
-#include "src/ray/object_manager/ownership_based_object_directory.h"
 #include "src/ray/protobuf/core_worker.grpc.pb.h"
 #include "src/ray/protobuf/core_worker.pb.h"
 
@@ -69,7 +69,7 @@ class MockSubscriber : public pubsub::SubscriberInterface {
     msg.set_channel_type(channel_type_);
     auto *object_eviction_msg = msg.mutable_worker_object_eviction_message();
     object_eviction_msg->set_object_id(object_id.Binary());
-    callback(msg);
+    callback(std::move(msg));
     cbs->second.pop_front();
     if (cbs->second.empty()) {
       callbacks.erase(cbs);
@@ -126,7 +126,7 @@ class MockWorkerClient : public rpc::CoreWorkerClientInterface {
     }
     auto callback = update_object_location_batch_callbacks.front();
     auto reply = rpc::UpdateObjectLocationBatchReply();
-    callback(status, reply);
+    callback(status, std::move(reply));
     update_object_location_batch_callbacks.pop_front();
     return true;
   }
@@ -155,7 +155,7 @@ class MockIOWorkerClient : public rpc::CoreWorkerClientInterface {
         reply.add_spilled_objects_url(url);
       }
     }
-    callback(status, reply);
+    callback(status, std::move(reply));
     callbacks.pop_front();
     return true;
   }
@@ -173,7 +173,7 @@ class MockIOWorkerClient : public rpc::CoreWorkerClientInterface {
       return false;
     };
     auto callback = restore_callbacks.front();
-    callback(status, reply);
+    callback(status, std::move(reply));
     restore_callbacks.pop_front();
     return true;
   }
@@ -194,7 +194,7 @@ class MockIOWorkerClient : public rpc::CoreWorkerClientInterface {
 
     auto callback = delete_callbacks.front();
     auto reply = rpc::DeleteSpilledObjectsReply();
-    callback(status, reply);
+    callback(status, std::move(reply));
 
     auto &request = delete_requests.front();
     int deleted_urls_size = request.spilled_objects_url_size();
@@ -211,7 +211,7 @@ class MockIOWorkerClient : public rpc::CoreWorkerClientInterface {
 
     auto callback = delete_callbacks.front();
     auto reply = rpc::DeleteSpilledObjectsReply();
-    callback(status, reply);
+    callback(status, std::move(reply));
 
     auto &request = delete_requests.front();
     int deleted_urls_size = request.spilled_objects_url_size();
@@ -633,14 +633,12 @@ TEST_F(LocalObjectManagerTest, TestSpillObjectsOfSizeZero) {
 
   std::vector<ObjectID> object_ids;
   std::vector<std::unique_ptr<RayObject>> objects;
-  int64_t total_size = 0;
   int64_t object_size = 1000;
 
   for (size_t i = 0; i < 3; i++) {
     ObjectID object_id = ObjectID::FromRandom();
     object_ids.push_back(object_id);
     auto data_buffer = std::make_shared<MockObjectBuffer>(object_size, object_id, unpins);
-    total_size += object_size;
     auto object = std::make_unique<RayObject>(
         data_buffer, nullptr, std::vector<rpc::ObjectReference>());
     objects.push_back(std::move(object));
@@ -1360,7 +1358,7 @@ TEST_F(LocalObjectManagerTest, TestDuplicatePinAndSpill) {
 
   bool spilled = false;
   manager.SpillObjects(object_ids, [&](const Status &status) {
-    RAY_CHECK(status.ok());
+    RAY_CHECK_OK(status);
     spilled = true;
   });
   ASSERT_FALSE(spilled);
@@ -1417,14 +1415,12 @@ TEST_F(LocalObjectManagerFusedTest, TestMinSpillingSize) {
 
   std::vector<ObjectID> object_ids;
   std::vector<std::unique_ptr<RayObject>> objects;
-  int64_t total_size = 0;
   int64_t object_size = 52;
 
   for (size_t i = 0; i < 3; i++) {
     ObjectID object_id = ObjectID::FromRandom();
     object_ids.push_back(object_id);
     auto data_buffer = std::make_shared<MockObjectBuffer>(object_size, object_id, unpins);
-    total_size += object_size;
     auto object = std::make_unique<RayObject>(
         data_buffer, nullptr, std::vector<rpc::ObjectReference>());
     objects.push_back(std::move(object));
@@ -1479,7 +1475,6 @@ TEST_F(LocalObjectManagerFusedTest, TestMinSpillingSizeMaxFusionCount) {
 
   std::vector<ObjectID> object_ids;
   std::vector<std::unique_ptr<RayObject>> objects;
-  int64_t total_size = 0;
   // 20 of these objects are needed to hit the min spilling size, but
   // max_fused_object_count=15.
   int64_t object_size = 5;
@@ -1488,7 +1483,6 @@ TEST_F(LocalObjectManagerFusedTest, TestMinSpillingSizeMaxFusionCount) {
     ObjectID object_id = ObjectID::FromRandom();
     object_ids.push_back(object_id);
     auto data_buffer = std::make_shared<MockObjectBuffer>(object_size, object_id, unpins);
-    total_size += object_size;
     auto object = std::make_unique<RayObject>(
         data_buffer, nullptr, std::vector<rpc::ObjectReference>());
     objects.push_back(std::move(object));
@@ -1570,7 +1564,7 @@ TEST_F(LocalObjectManagerTest, TestPinBytes) {
   // Spill all objects.
   bool spilled = false;
   manager.SpillObjects(object_ids, [&](const Status &status) {
-    RAY_CHECK(status.ok());
+    RAY_CHECK_OK(status);
     spilled = true;
   });
   ASSERT_FALSE(spilled);
@@ -1652,7 +1646,7 @@ TEST_F(LocalObjectManagerTest, TestConcurrentSpillAndDelete1) {
   // Spill all objects.
   bool spilled = false;
   manager.SpillObjects(object_ids, [&](const Status &status) {
-    RAY_CHECK(status.ok());
+    RAY_CHECK_OK(status);
     spilled = true;
   });
   ASSERT_FALSE(spilled);
@@ -1725,7 +1719,7 @@ TEST_F(LocalObjectManagerTest, TestConcurrentSpillAndDelete2) {
   // Spill all objects.
   bool spilled = false;
   manager.SpillObjects(object_ids, [&](const Status &status) {
-    RAY_CHECK(status.ok());
+    RAY_CHECK_OK(status);
     spilled = true;
   });
   ASSERT_FALSE(spilled);
