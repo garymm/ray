@@ -1,9 +1,13 @@
 import logging
 import os
 from typing import Dict, List, Optional
-import pkg_resources
 
 import ray._private.ray_constants as ray_constants
+from ray._private.utils import (
+    validate_node_labels,
+    check_ray_client_dependencies_installed,
+)
+
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +69,8 @@ class RayParams:
             the primary Redis shard.
         redis_max_clients: If provided, attempt to configure Redis with this
             maxclients number.
+        redis_username: Prevents external clients without the username
+            from connecting to Redis if provided.
         redis_password: Prevents external clients without the password
             from connecting to Redis if provided.
         plasma_directory: A directory where the Plasma memory mapped files will
@@ -91,9 +97,12 @@ class RayParams:
         dashboard_grpc_port: The port for the dashboard head process to listen
             for gRPC on.
             Defaults to random available port.
-        plasma_store_socket_name: If provided, it will specify the socket
+        runtime_env_agent_port: The port at which the runtime env agent
+            listens to for HTTP.
+            Defaults to random available port.
+        plasma_store_socket_name: If provided, it specifies the socket
             name used by the plasma store.
-        raylet_socket_name: If provided, it will specify the socket path
+        raylet_socket_name: If provided, it specifies the socket path
             used by the raylet process.
         temp_dir: If provided, it will specify the root temporary
             directory for the Ray process. Must be an absolute path.
@@ -122,6 +131,10 @@ class RayParams:
         env_vars: Override environment variables for the raylet.
         session_name: The name of the session of the ray cluster.
         webui: The url of the UI.
+        cluster_id: The cluster ID in hex string.
+        enable_physical_mode: Whether physical mode is enabled, which applies
+            constraint to tasks' resource consumption. As of now, only memory resource
+            is supported.
     """
 
     def __init__(
@@ -153,6 +166,7 @@ class RayParams:
         external_addresses: Optional[List[str]] = None,
         num_redis_shards: Optional[int] = None,
         redis_max_clients: Optional[int] = None,
+        redis_username: Optional[str] = ray_constants.REDIS_DEFAULT_USERNAME,
         redis_password: Optional[str] = ray_constants.REDIS_DEFAULT_PASSWORD,
         plasma_directory: Optional[str] = None,
         worker_path: Optional[str] = None,
@@ -164,6 +178,7 @@ class RayParams:
         dashboard_agent_listen_port: Optional[
             int
         ] = ray_constants.DEFAULT_DASHBOARD_AGENT_LISTEN_PORT,
+        runtime_env_agent_port: Optional[int] = None,
         dashboard_grpc_port: Optional[int] = None,
         plasma_store_socket_name: Optional[str] = None,
         raylet_socket_name: Optional[str] = None,
@@ -182,6 +197,9 @@ class RayParams:
         env_vars: Optional[Dict[str, str]] = None,
         session_name: Optional[str] = None,
         webui: Optional[str] = None,
+        cluster_id: Optional[str] = None,
+        node_id: Optional[str] = None,
+        enable_physical_mode: bool = False,
     ):
         self.redis_address = redis_address
         self.gcs_address = gcs_address
@@ -208,6 +226,7 @@ class RayParams:
         self.external_addresses = external_addresses
         self.num_redis_shards = num_redis_shards
         self.redis_max_clients = redis_max_clients
+        self.redis_username = redis_username
         self.redis_password = redis_password
         self.plasma_directory = plasma_directory
         self.worker_path = worker_path
@@ -218,6 +237,7 @@ class RayParams:
         self.dashboard_port = dashboard_port
         self.dashboard_agent_listen_port = dashboard_agent_listen_port
         self.dashboard_grpc_port = dashboard_grpc_port
+        self.runtime_env_agent_port = runtime_env_agent_port
         self.plasma_store_socket_name = plasma_store_socket_name
         self.raylet_socket_name = raylet_socket_name
         self.temp_dir = temp_dir
@@ -242,6 +262,9 @@ class RayParams:
         self._enable_object_reconstruction = enable_object_reconstruction
         self.labels = labels
         self._check_usage()
+        self.cluster_id = cluster_id
+        self.node_id = node_id
+        self.enable_physical_mode = enable_physical_mode
 
         # Set the internal config options for object reconstruction.
         if enable_object_reconstruction:
@@ -307,6 +330,7 @@ class RayParams:
             "dashboard_agent_grpc": wrap_port(self.metrics_agent_port),
             "dashboard_agent_http": wrap_port(self.dashboard_agent_listen_port),
             "dashboard_grpc": wrap_port(self.dashboard_grpc_port),
+            "runtime_env_agent": wrap_port(self.runtime_env_agent_port),
             "metrics_export": wrap_port(self.metrics_export_port),
         }
         redis_shard_ports = self.redis_shard_ports
@@ -386,14 +410,28 @@ class RayParams:
                     raise ValueError(
                         "max_worker_port must be higher than min_worker_port."
                     )
-
         if self.ray_client_server_port is not None:
+            if not check_ray_client_dependencies_installed():
+                raise ValueError(
+                    "Ray Client requires pip package `ray[client]`. "
+                    "If you installed the minimal Ray (e.g. `pip install ray`), "
+                    "please reinstall by executing `pip install ray[client]`."
+                )
             if (
                 self.ray_client_server_port < 1024
                 or self.ray_client_server_port > 65535
             ):
                 raise ValueError(
                     "ray_client_server_port must be an integer "
+                    "between 1024 and 65535."
+                )
+        if self.runtime_env_agent_port is not None:
+            if (
+                self.runtime_env_agent_port < 1024
+                or self.runtime_env_agent_port > 65535
+            ):
+                raise ValueError(
+                    "runtime_env_agent_port must be an integer "
                     "between 1024 and 65535."
                 )
 
@@ -419,17 +457,10 @@ class RayParams:
         if self.redirect_output is not None:
             raise DeprecationWarning("The redirect_output argument is deprecated.")
 
-        # Parse the numpy version.
-        numpy_version = pkg_resources.get_distribution("numpy").version.split(".")
-        numpy_major, numpy_minor = int(numpy_version[0]), int(numpy_version[1])
-        if numpy_major <= 1 and numpy_minor < 16:
-            logger.warning(
-                "Using ray with numpy < 1.16.0 will result in slow "
-                "serialization. Upgrade numpy if using with ray."
-            )
-
         if self.temp_dir is not None and not os.path.isabs(self.temp_dir):
             raise ValueError("temp_dir must be absolute path or None.")
+
+        validate_node_labels(self.labels)
 
     def _format_ports(self, pre_selected_ports):
         """Format the pre-selected ports information to be more human-readable."""

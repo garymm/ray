@@ -9,11 +9,12 @@
 
 #include "ray/common/ray_config.h"
 #include "ray/object_manager/plasma/plasma_allocator.h"
+#include "ray/util/thread_utils.h"
 
 namespace plasma {
 namespace internal {
 void SetMallocGranularity(int value);
-}
+}  // namespace internal
 
 PlasmaStoreRunner::PlasmaStoreRunner(std::string socket_name,
                                      int64_t system_memory,
@@ -110,7 +111,6 @@ void PlasmaStoreRunner::Start(ray::SpillObjectsCallback spill_objects_callback,
                                  *fs_monitor_,
                                  socket_name_,
                                  RayConfig::instance().object_store_full_delay_ms(),
-                                 RayConfig::instance().object_spilling_threshold(),
                                  spill_objects_callback,
                                  object_store_full_callback,
                                  add_object_callback,

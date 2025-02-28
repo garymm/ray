@@ -27,7 +27,7 @@ ObjectLifecycleManager::ObjectLifecycleManager(
     IAllocator &allocator, ray::DeleteObjectCallback delete_object_callback)
     : object_store_(std::make_unique<ObjectStore>(allocator)),
       eviction_policy_(std::make_unique<EvictionPolicy>(*object_store_, allocator)),
-      delete_object_callback_(delete_object_callback),
+      delete_object_callback_(std::move(delete_object_callback)),
       earger_deletion_objects_(),
       stats_collector_(std::make_unique<ObjectStatsCollector>()) {}
 
@@ -257,6 +257,10 @@ int64_t ObjectLifecycleManager::GetNumBytesInUse() const {
 bool ObjectLifecycleManager::IsObjectSealed(const ObjectID &object_id) const {
   auto entry = GetObject(object_id);
   return entry && entry->state == ObjectState::PLASMA_SEALED;
+}
+
+int64_t ObjectLifecycleManager::GetNumObjectsCreatedTotal() const {
+  return stats_collector_->GetNumObjectsCreatedTotal();
 }
 
 int64_t ObjectLifecycleManager::GetNumBytesCreatedTotal() const {

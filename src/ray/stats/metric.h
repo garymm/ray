@@ -18,6 +18,7 @@
 
 #include <functional>
 #include <memory>
+#include <regex>
 #include <tuple>
 #include <unordered_map>
 #include <utility>  // std::pair
@@ -105,21 +106,13 @@ class Metric {
   Metric(const std::string &name,
          const std::string &description,
          const std::string &unit,
-         const std::vector<opencensus::tags::TagKey> &tag_keys = {})
-      : name_(name),
-        description_(description),
-        unit_(unit),
-        tag_keys_(tag_keys),
-        measure_(nullptr) {}
-
-  Metric(const std::string &name,
-         const std::string &description,
-         const std::string &unit,
-         const std::vector<std::string> &tag_keys);
+         const std::vector<std::string> &tag_keys = {});
 
   virtual ~Metric();
 
   Metric &operator()() { return *this; }
+
+  static const std::regex &GetMetricNameRegex();
 
   /// Get the name of this metric.
   std::string GetName() const { return name_; }
@@ -152,6 +145,8 @@ class Metric {
   // For making sure thread-safe to all of metric registrations.
   static absl::Mutex registration_mutex_;
 
+ private:
+  const std::regex &name_regex_;
 };  // class Metric
 
 class Gauge : public Metric {
@@ -159,13 +154,7 @@ class Gauge : public Metric {
   Gauge(const std::string &name,
         const std::string &description,
         const std::string &unit,
-        const std::vector<opencensus::tags::TagKey> &tag_keys = {})
-      : Metric(name, description, unit, tag_keys) {}
-
-  Gauge(const std::string &name,
-        const std::string &description,
-        const std::string &unit,
-        const std::vector<std::string> &tag_keys)
+        const std::vector<std::string> &tag_keys = {})
       : Metric(name, description, unit, tag_keys) {}
 
  private:
@@ -179,14 +168,7 @@ class Histogram : public Metric {
             const std::string &description,
             const std::string &unit,
             const std::vector<double> boundaries,
-            const std::vector<opencensus::tags::TagKey> &tag_keys = {})
-      : Metric(name, description, unit, tag_keys), boundaries_(boundaries) {}
-
-  Histogram(const std::string &name,
-            const std::string &description,
-            const std::string &unit,
-            const std::vector<double> boundaries,
-            const std::vector<std::string> &tag_keys)
+            const std::vector<std::string> &tag_keys = {})
       : Metric(name, description, unit, tag_keys), boundaries_(boundaries) {}
 
  private:
@@ -202,13 +184,7 @@ class Count : public Metric {
   Count(const std::string &name,
         const std::string &description,
         const std::string &unit,
-        const std::vector<opencensus::tags::TagKey> &tag_keys = {})
-      : Metric(name, description, unit, tag_keys) {}
-
-  Count(const std::string &name,
-        const std::string &description,
-        const std::string &unit,
-        const std::vector<std::string> &tag_keys)
+        const std::vector<std::string> &tag_keys = {})
       : Metric(name, description, unit, tag_keys) {}
 
  private:
@@ -221,28 +197,13 @@ class Sum : public Metric {
   Sum(const std::string &name,
       const std::string &description,
       const std::string &unit,
-      const std::vector<opencensus::tags::TagKey> &tag_keys = {})
-      : Metric(name, description, unit, tag_keys) {}
-
-  Sum(const std::string &name,
-      const std::string &description,
-      const std::string &unit,
-      const std::vector<std::string> &tag_keys)
+      const std::vector<std::string> &tag_keys = {})
       : Metric(name, description, unit, tag_keys) {}
 
  private:
   void RegisterView() override;
 
 };  // class Sum
-
-/// Raw metric view point for exporter.
-struct MetricPoint {
-  std::string metric_name;
-  int64_t timestamp;
-  double value;
-  std::unordered_map<std::string, std::string> tags;
-  const opencensus::stats::MeasureDescriptor &measure_descriptor;
-};
 
 enum StatsType : int { COUNT, SUM, GAUGE, HISTOGRAM };
 

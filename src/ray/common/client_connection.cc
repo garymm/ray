@@ -28,7 +28,58 @@
 #include "ray/common/ray_config.h"
 #include "ray/util/util.h"
 
+#if defined(_WIN32)
+#include <Windows.h>
+#else
+#include <fcntl.h>
+#include <unistd.h>
+#endif
+
 namespace ray {
+
+namespace {
+
+#if defined(_WIN32)
+// Don't care what exact type is in windows... Looks like to be an asio specific type.
+template <typename NativeHandleType>
+void SetFdCloseOnExec(const NativeHandleType &handle) {
+  // In Windows we don't need to do anything, beacuse in CreateProcess we pass
+  // bInheritHandles = false which means we don't inherit handles or sockets.
+  // https://github.com/ray-project/ray/blob/928183b3acab3c4ad73ef3001203a7aaf009bc87/src/ray/util/process.cc#L148
+  // https://learn.microsoft.com/en-us/windows/win32/sysinfo/handle-inheritance
+  return;
+}
+#else
+
+// Sets the flag FD_CLOEXEC to a file descriptor.
+// This means when the process is forked, this fd would be closed in the child process
+// side. Raylet forks to create core workers and we don't want the Unix Socket FDs to be
+// inherited by the core workers. Leaking these FDs would have performance implications.
+//
+// Idempotent. Calling twice == calling once.
+// Not thread safe.
+// See https://github.com/ray-project/ray/issues/40813
+void SetFdCloseOnExec(int fd) {
+  if (fd < 0) {
+    return;
+  }
+  int flags = fcntl(fd, F_GETFD, 0);
+  RAY_CHECK_NE(flags, -1) << "fcntl error: errno = " << errno << ", fd = " << fd;
+  const int ret = fcntl(fd, F_SETFD, flags | FD_CLOEXEC);
+  RAY_CHECK_NE(ret, -1) << "fcntl error: errno = " << errno << ", fd = " << fd;
+  RAY_LOG(DEBUG) << "set FD_CLOEXEC to fd " << fd;
+}
+#endif
+
+}  // namespace
+
+void SetCloseOnExec(local_stream_socket &socket) {
+  SetFdCloseOnExec(socket.native_handle());
+}
+
+void SetCloseOnExec(boost::asio::basic_socket_acceptor<local_stream_protocol> &acceptor) {
+  SetFdCloseOnExec(acceptor.native_handle());
+}
 
 Status ConnectSocketRetry(local_stream_socket &socket,
                           const std::string &endpoint,
@@ -64,16 +115,17 @@ Status ConnectSocketRetry(local_stream_socket &socket,
 }
 
 std::shared_ptr<ServerConnection> ServerConnection::Create(local_stream_socket &&socket) {
-  std::shared_ptr<ServerConnection> self(new ServerConnection(std::move(socket)));
-  return self;
+  return std::make_shared<ServerConnection>(Tag{}, std::move(socket));
 }
 
-ServerConnection::ServerConnection(local_stream_socket &&socket)
+ServerConnection::ServerConnection(Tag, local_stream_socket &&socket)
     : socket_(std::move(socket)),
       async_write_max_messages_(1),
       async_write_queue_(),
       async_write_in_flight_(false),
-      async_write_broken_pipe_(false) {}
+      async_write_broken_pipe_(false) {
+  SetCloseOnExec(socket_);
+}
 
 ServerConnection::~ServerConnection() {
   // If there are any pending messages, invoke their callbacks with an IOError status.
@@ -148,7 +200,11 @@ Status ServerConnection::ReadBuffer(
       bytes_remaining -= bytes_read;
       if (error.value() == EINTR) {
         continue;
-      } else if (error.value() != boost::system::errc::errc_t::success) {
+      }
+      if (error.value() == ENOENT) {
+        return Status::IOError("Failed to read data from the socket: " + error.message());
+      }
+      if (error.value() != boost::system::errc::errc_t::success) {
         return boost_to_ray_status(error);
       }
     }
@@ -164,7 +220,7 @@ void ServerConnection::ReadBufferAsync(
     auto &io_context =
         static_cast<instrumented_io_context &>(socket_.get_executor().context());
     const auto stats_handle =
-        io_context.stats().RecordStart("ClientConnection.async_read.ReadBufferAsync");
+        io_context.stats().RecordStart("ServerConnection.async_read.ReadBufferAsync");
     boost::asio::async_read(
         socket_,
         buffer,
@@ -236,7 +292,6 @@ void ServerConnection::WriteMessageAsync(
   write_buffer->write_cookie = RayConfig::instance().ray_cookie();
   write_buffer->write_type = type;
   write_buffer->write_length = length;
-  write_buffer->write_message.resize(length);
   write_buffer->write_message.assign(message, message + length);
   write_buffer->handler = handler;
 
@@ -361,17 +416,19 @@ std::shared_ptr<ClientConnection> ClientConnection::Create(
     const std::string &debug_label,
     const std::vector<std::string> &message_type_enum_names,
     int64_t error_message_type) {
-  std::shared_ptr<ClientConnection> self(new ClientConnection(message_handler,
-                                                              std::move(socket),
-                                                              debug_label,
-                                                              message_type_enum_names,
-                                                              error_message_type));
+  auto self = std::make_shared<ClientConnection>(Tag{},
+                                                 message_handler,
+                                                 std::move(socket),
+                                                 debug_label,
+                                                 message_type_enum_names,
+                                                 error_message_type);
   // Let our manager process our new connection.
   client_handler(*self);
   return self;
 }
 
 ClientConnection::ClientConnection(
+    Tag,
     MessageHandler &message_handler,
     local_stream_socket &&socket,
     const std::string &debug_label,
@@ -401,8 +458,8 @@ void ClientConnection::ProcessMessages() {
     auto this_ptr = shared_ClientConnection_from_this();
     auto &io_context = static_cast<instrumented_io_context &>(
         ServerConnection::socket_.get_executor().context());
-    const auto stats_handle =
-        io_context.stats().RecordStart("ClientConnection.async_read.ReadBufferAsync");
+    const auto stats_handle = io_context.stats().RecordStart(
+        "ClientConnection.async_read.ProcessMessageHeader");
     boost::asio::async_read(
         ServerConnection::socket_,
         header,
@@ -443,7 +500,7 @@ void ClientConnection::ProcessMessageHeader(const boost::system::error_code &err
     auto &io_context = static_cast<instrumented_io_context &>(
         ServerConnection::socket_.get_executor().context());
     const auto stats_handle =
-        io_context.stats().RecordStart("ClientConnection.async_read.ReadBufferAsync");
+        io_context.stats().RecordStart("ClientConnection.async_read.ProcessMessage");
     boost::asio::async_read(
         ServerConnection::socket_,
         boost::asio::buffer(read_message_),

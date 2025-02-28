@@ -1,11 +1,27 @@
-.. include:: /_includes/core/announcement.rst
-
 .. _core-walkthrough:
 
 What is Ray Core?
 =================
 
+.. toctree::
+    :maxdepth: 1
+    :hidden:
+
+    Key Concepts <key-concepts>
+    User Guides <user-guide>
+    Examples <examples/overview>
+    api/index
+
+
 Ray Core provides a small number of core primitives (i.e., tasks, actors, objects) for building and scaling distributed applications. Below we'll walk through simple examples that show you how to turn your functions and classes easily into Ray tasks and actors, and how to work with Ray objects.
+
+.. note::
+
+    Ray has introduced an experimental API for high-performance workloads that is
+    especially well suited for applications using multiple GPUs.
+    See :ref:`Ray Compiled Graph <ray-compiled-graph>` for more details.
+    
+    See :ref:`Ray Compiled Graph <ray-compiled-graph>` for more details.
 
 Getting Started
 ---------------
@@ -60,7 +76,7 @@ As seen above, Ray stores task and actor call results in its :ref:`distributed o
 Next Steps
 ----------
 
-.. tip:: To check how your application is doing, you can use the :ref:`Ray dashboard <observability-getting-started>`. 
+.. tip:: To check how your application is doing, you can use the :ref:`Ray dashboard <observability-getting-started>`.
 
 Ray's key primitives are simple, but can be composed together to express almost any kind of distributed computation.
 Learn more about Ray's :ref:`key concepts <core-key-concepts>` with the following user guides:
@@ -93,6 +109,3 @@ Learn more about Ray's :ref:`key concepts <core-key-concepts>` with the followin
         .. button-ref:: objects-in-ray
 
             Working with Ray Objects
-
-
-.. include:: /_includes/core/announcement_bottom.rst
